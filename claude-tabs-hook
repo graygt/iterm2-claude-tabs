@@ -1,0 +1,178 @@
+#!/usr/bin/python3
+"""Claude Code hook for the iterm2-claude-tabs panel.
+
+Records per-iTerm2-session Claude state in ~/.config/claude-tabs/state/<session-uuid>.json:
+  state: working | waiting | done | error | idle
+  since: when the state last changed (epoch seconds)
+Must stay fast and never fail the hook: every error is swallowed.
+"""
+import json
+import os
+import sys
+import time
+
+BASE = os.path.expanduser("~/.config/claude-tabs")
+STATE_DIR = os.path.join(BASE, "state")
+CLOSED_DIR = os.path.join(BASE, "closed")
+MARKS_PATH = os.path.join(BASE, "marks.json")
+# Optional: if <claude config>/session-names/<session_id> exists (e.g. written by a
+# custom status line), its text is used as the session's title in the panel.
+NAMES_DIR = os.path.join(
+    os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"), "session-names")
+
+WORKING_EVENTS = {
+    "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "PreCompact",
+}
+# Debug trail of every hook event; on only while ~/.config/claude-tabs/debug exists.
+LOG_PATH = os.path.join(BASE, "events.log")
+LOG_MAX = 256 * 1024
+DEBUG = os.path.exists(os.path.join(BASE, "debug"))
+
+
+def log_event(term_sid, ev, cur_state):
+    """Short event trail for debugging state mistakes; trimmed when it grows."""
+    if not DEBUG:
+        return
+    try:
+        if os.path.exists(LOG_PATH) and os.path.getsize(LOG_PATH) > LOG_MAX:
+            os.replace(LOG_PATH, LOG_PATH + ".1")
+        with open(LOG_PATH, "a") as f:
+            f.write("%s %s %-18s agent=%s tool=%s note=%s was=%s\n" % (
+                time.strftime("%H:%M:%S"), term_sid[:8], ev.get("hook_event_name", ""),
+                ev.get("agent_id") or "-", ev.get("tool_name") or "-",
+                ev.get("notification_type") or "-", cur_state))
+    except Exception:
+        pass
+
+
+def remember_closed(term_sid, cur, reason):
+    """Keep enough to reopen the session from the panel's Recently closed list."""
+    csid = cur.get("claude_sid")
+    if not csid or not (cur.get("prompt") or cur.get("title")):
+        return  # never used: not worth listing
+    try:
+        with open(MARKS_PATH) as f:
+            marks = json.load(f)
+        m = (marks.get("sessions") or {}).get(term_sid) or {}
+    except Exception:
+        m = {}
+    rec = {
+        "claude_sid": csid, "cwd": cur.get("cwd"), "title": m.get("title") or cur.get("title"),
+        "prompt": cur.get("prompt"), "closed_at": time.time(), "reason": reason,
+        "marks": {k: m[k] for k in ("project", "color", "note", "title", "star") if m.get(k)},
+    }
+    os.makedirs(CLOSED_DIR, exist_ok=True)
+    out = os.path.join(CLOSED_DIR, csid + ".json")
+    try:  # the panel may have recorded it a moment ago, before its marks were dropped
+        with open(out) as f:
+            prev = json.load(f)
+        if not rec["marks"]:
+            rec["marks"] = prev.get("marks") or {}
+        rec["title"] = rec["title"] or prev.get("title")
+    except Exception:
+        pass
+    tmp = out + ".%d.tmp" % os.getpid()
+    with open(tmp, "w") as f:
+        json.dump(rec, f)
+    os.replace(tmp, out)
+
+
+def main():
+    term_sid = os.environ.get("ITERM_SESSION_ID", "")
+    if ":" not in term_sid:
+        return
+    term_sid = term_sid.split(":", 1)[1]
+    try:
+        ev = json.load(sys.stdin)
+    except Exception:
+        return
+    name = ev.get("hook_event_name", "")
+    path = os.path.join(STATE_DIR, term_sid + ".json")
+
+    try:
+        with open(path) as f:
+            cur = json.load(f)
+    except Exception:
+        cur = {}
+
+    log_event(term_sid, ev, cur.get("state"))
+
+    if name == "SessionEnd":
+        remember_closed(term_sid, cur, ev.get("reason") or "exited")
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return
+    if name == "SessionStart" and ev.get("session_id"):
+        # Resumed again: it is no longer "recently closed".
+        try:
+            os.remove(os.path.join(CLOSED_DIR, ev["session_id"] + ".json"))
+        except OSError:
+            pass
+
+    # Events from subagents (incl. background agents that outlive the turn) say
+    # nothing about whether the main conversation is waiting on you.
+    if ev.get("agent_id") and name != "PermissionRequest":
+        return
+
+    state = None
+    detail = None
+    if name == "SessionStart":
+        state = "idle"
+    elif name in WORKING_EVENTS:
+        state = "working"
+        if name == "UserPromptSubmit":
+            prompt = " ".join((ev.get("prompt") or "").split())
+            cur["prompt"] = prompt[:200]
+        elif ev.get("tool_name"):
+            detail = ev["tool_name"]
+    elif name == "PermissionRequest":
+        state = "waiting"
+        detail = "allow " + (ev.get("tool_name") or "tool") + "?"
+    elif name == "Notification":
+        kind = ev.get("notification_type", "")
+        if kind in ("permission_prompt", "elicitation_dialog"):
+            state = "waiting"
+            detail = ev.get("message") or "needs input"
+        elif kind == "idle_prompt" and cur.get("state") == "working":
+            # Interrupted turns (Esc) never fire Stop; the idle prompt catches them.
+            state = "idle"
+    elif name == "Stop":
+        state = "done"
+    elif name == "StopFailure":
+        state = "error"
+        detail = str(ev.get("error") or ev.get("error_type") or "API error")[:120]
+
+    now = time.time()
+    if (state and state != cur.get("state")) or "since" not in cur:
+        cur["since"] = now
+    if state:
+        cur["state"] = state
+        cur["detail"] = detail
+    cur["updated"] = now
+    if ev.get("cwd"):
+        cur["cwd"] = ev["cwd"]
+    csid = ev.get("session_id")
+    if csid:
+        cur["claude_sid"] = csid
+        try:
+            with open(os.path.join(NAMES_DIR, csid)) as f:
+                title = f.read().strip()
+            if title:
+                cur["title"] = title
+        except OSError:
+            pass
+
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = path + ".%d.tmp" % os.getpid()
+    with open(tmp, "w") as f:
+        json.dump(cur, f)
+    os.replace(tmp, path)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        pass
