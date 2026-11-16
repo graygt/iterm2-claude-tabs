@@ -4,7 +4,18 @@
 
 If you run Claude Code in many tabs at once (some working, some waiting for an answer, some parked for later, spread over several projects), the tab bar stops telling you anything. iterm2-claude-tabs adds a panel to the right of the iTerm2 window that lists every Claude session across all windows, shows what each one is doing, and lets you group, order and mark them the way you think about your work.
 
-<!-- Screenshot: docs/panel.png -->
+<table>
+<tr>
+<td width="50%"><img src="docs/panel.png" alt="The panel listing sessions grouped by project, with live status, a fork nested under its original, notes, colour tags, a Postponed section and Recently closed sessions"></td>
+<td width="50%"><img src="docs/panel-menu.png" alt="Right-click menu of a session: go to tab, fork session, star, colour tags, move to group, rename, note, close"></td>
+</tr>
+<tr>
+<td align="center">Sessions by project, with live status</td>
+<td align="center">Right-click a session</td>
+</tr>
+</table>
+
+<sub>Screenshots use demo data; regenerate them with <code>python3 docs/screenshot.py</code>.</sub>
 
 ## Features
 
