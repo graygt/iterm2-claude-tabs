@@ -262,12 +262,26 @@ async def snapshot():
                     "order": m.get("order"),
                     "where": "w%d · tab %d" % (wi + 1, ti + 1),
                     "can_fork": bool(st.get("claude_sid")),
+                    "csid": st.get("claude_sid") or "",
                     "parent": m.get("parent") or "",
                     "tasks": [{"type": t.get("type") or "task", "desc": t.get("desc") or ""}
                               for t in (st.get("tasks") or [])][:20],
                     "crons": int(st.get("crons") or 0),
                     "active": sid == FOCUS["session"],
                 })
+
+    # A fork whose parent was closed and reopened (new tab id) finds it again.
+    by_csid = {r["csid"]: r["id"] for r in rows if r["csid"]}
+    row_ids = {r["id"] for r in rows}
+    relinked = False
+    for r in rows:
+        m = sessions.get(r["id"]) or {}
+        found = by_csid.get(m.get("parent_csid"))
+        if found and found != r["id"] and r["parent"] not in row_ids:
+            m["parent"] = r["parent"] = found
+            relinked = True
+    if relinked:
+        save_marks(marks)
 
     # Tabs that are gone: list them under Recently closed, then forget them.
     try:
@@ -318,6 +332,29 @@ async def apply_tab_color(sid, color):
     await session.async_set_profile_properties(p)
 
 
+def parent_csid_of(m):
+    """Claude session id of a fork's parent. Tab ids change when a session is reopened;
+    the Claude id doesn't, so it is what links a fork back to its parent."""
+    if m.get("parent_csid"):
+        return m["parent_csid"]
+    if m.get("parent"):
+        return (load_json(os.path.join(STATE_DIR, m["parent"] + ".json"), {}) or {}).get("claude_sid")
+    return None
+
+
+def live_session_for(csid):
+    """iTerm2 session id of the open tab running this Claude session, if any."""
+    if not csid:
+        return None
+    for window in APP.terminal_windows:
+        for tab in window.tabs:
+            for session in tab.sessions:
+                st = load_json(os.path.join(STATE_DIR, session.session_id + ".json"), {}) or {}
+                if st.get("claude_sid") == csid:
+                    return session.session_id
+    return None
+
+
 def remember_closed(sid, st, m, reason):
     """Record a session for the Recently closed list (same format the hook writes)."""
     csid = st.get("claude_sid")
@@ -329,6 +366,8 @@ def remember_closed(sid, st, m, reason):
         "prompt": st.get("prompt"), "closed_at": time.time(), "reason": reason,
         "marks": {k: m[k] for k in ("project", "color", "note", "star") if m.get(k)},
     }
+    if parent_csid_of(m):
+        rec["marks"]["parent_csid"] = parent_csid_of(m)
     os.makedirs(CLOSED_DIR, exist_ok=True)
     out = os.path.join(CLOSED_DIR, csid + ".json")
     tmp = out + ".tmp"
@@ -379,17 +418,34 @@ async def reopen_session(csid):
     rec = load_json(path, None)
     if not rec:
         return {"ok": False, "error": "not in the closed list"}
-    window = APP.current_terminal_window
+    m = dict(rec.get("marks") or {})
+    m.pop("title", None)  # the resumed session keeps Claude's own title
+    m.pop("parent", None)
+    # A fork whose parent is still open goes back under it, in a tab right after it.
+    parent = live_session_for(m.get("parent_csid"))
+    window, idx = APP.current_terminal_window, None
+    if parent:
+        pwin, ptab = APP.get_tab_and_window_for_session(APP.get_session_by_id(parent))
+        if pwin and ptab in pwin.tabs:
+            window, idx = pwin, pwin.tabs.index(ptab) + 1
     if window is None:
         window = await iterm2.Window.async_create(APP.connection)
         new = window.current_tab.current_session
     else:
-        new = (await window.async_create_tab()).current_session
+        new = (await window.async_create_tab(index=idx)).current_session
     cwd = rec.get("cwd") or HOME
     await new.async_send_text("cd %s && claude -r %s\n" % (shlex.quote(cwd), shlex.quote(rec["claude_sid"])))
     marks = load_marks()
-    m = dict(rec.get("marks") or {})
-    m.pop("title", None)  # the resumed session keeps Claude's own title
+    if parent:
+        pm = marks["sessions"].get(parent, {})
+        m["parent"] = parent
+        if pm.get("project"):  # forks nest only inside their parent's group
+            m["project"] = pm["project"]
+        else:
+            m.pop("project", None)
+        m.pop("postponed", None)
+        if pm.get("order") is not None:
+            m["order"] = pm["order"] + 0.5
     if m:
         marks["sessions"][new.session_id] = m
         if m.get("project") and m["project"] not in marks["groups"]:
@@ -456,7 +512,7 @@ async def fork_session(sid):
     # The fork starts in the same group, right below the original.
     marks = load_marks()
     m = marks["sessions"].get(sid, {})
-    nm = {"parent": sid}  # shown nested under the original until detached
+    nm = {"parent": sid, "parent_csid": csid}  # shown nested under the original until detached
     if m.get("project"):
         nm["project"] = m["project"]
     if m.get("order") is not None:
@@ -537,12 +593,14 @@ async def act(req):
                     marks["groups"].append(g)
             elif key == "parent":
                 m.pop("parent", None)  # only detaching is supported
+                m.pop("parent_csid", None)
             else:
                 return {"ok": False, "error": "bad key"}
     elif op == "place":
         sid = req.get("id", "")
         m = sessions.setdefault(sid, {})
         m.pop("parent", None)  # dragging a fork somewhere makes it a regular tab
+        m.pop("parent_csid", None)
         if req.get("post"):
             m["postponed"] = True
         else:

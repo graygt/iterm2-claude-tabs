@@ -66,8 +66,16 @@ def remember_closed(term_sid, cur, reason):
         "claude_sid": csid, "cwd": cur.get("cwd"),
         "title": transcript_title(cur.get("transcript") or "") or cur.get("title"),
         "prompt": cur.get("prompt"), "closed_at": time.time(), "reason": reason,
-        "marks": {k: m[k] for k in ("project", "color", "note", "title", "star") if m.get(k)},
+        "marks": {k: m[k] for k in ("project", "color", "note", "star", "parent_csid") if m.get(k)},
     }
+    if m.get("parent") and not rec["marks"].get("parent_csid"):  # forks made before parent_csid
+        try:
+            with open(os.path.join(STATE_DIR, os.path.basename(m["parent"]) + ".json")) as f:
+                pc = json.load(f).get("claude_sid")
+            if pc:
+                rec["marks"]["parent_csid"] = pc
+        except Exception:
+            pass
     os.makedirs(CLOSED_DIR, exist_ok=True)
     out = os.path.join(CLOSED_DIR, csid + ".json")
     try:  # the panel may have recorded it a moment ago, before its marks were dropped
