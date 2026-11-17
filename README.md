@@ -30,7 +30,8 @@ If you run Claude Code in many tabs at once (some working, some waiting for an a
 - **Groups.** Sessions start ungrouped at the top. Create groups (right-click empty space → New group…), drag sessions into them, drag whole groups to reorder them, collapse them, rename them.
 - **Two sorts:** *Urgency* puts "needs you" first; *Manual* keeps your drag order.
 - **Two views:** by *Project* (your groups) or by *Status*.
-- **Marks:** star a session, give it a colour (the real iTerm2 tab gets the same colour), rename it, attach a note.
+- **Marks:** star a session, give it a colour (the real iTerm2 tab gets the same colour), attach a note.
+- **Titles stay in sync with Claude.** Rows show the session's own title, so a `/rename` inside Claude shows up in the panel within a second. Renaming a row in the panel renames the Claude session too (saved like `/rename`); Claude takes the new name with your next prompt in that tab, marked ↻ until then.
 - **Postponed:** drag sessions you'll come back to into a folded section at the bottom. It opens by itself when you switch to one of its tabs.
 - **Fork session:** right-click → *Fork session* opens `claude -r <id> --fork-session` in a new tab right next to the original, in the same folder. No more `/status` and copy-pasting IDs.
 - **Recently closed:** sessions whose tab you closed are listed for two weeks; click one to resume it in a new tab with its group, colour and note.

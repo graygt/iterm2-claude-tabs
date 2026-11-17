@@ -6,8 +6,9 @@ Records per-iTerm2-session Claude state in ~/.config/claude-tabs/state/<session-
   since: when the state last changed (epoch seconds)
   tasks: background work still running (subagents, background shells), for the badge
   crons: number of scheduled jobs (/loop) in the session
-A title set in the panel is handed to Claude Code as the session title (the same
-thing /rename does) on the session's next prompt.
+  transcript: the session's transcript, where the panel reads Claude's own title
+A rename from the panel waits in ~/.config/claude-tabs/rename/<session-uuid> and is
+handed to Claude Code as the session title (what /rename does) on the next prompt.
 Must stay fast and never fail the hook: every error is swallowed.
 """
 import json
@@ -19,6 +20,7 @@ BASE = os.path.expanduser("~/.config/claude-tabs")
 STATE_DIR = os.path.join(BASE, "state")
 CLOSED_DIR = os.path.join(BASE, "closed")
 MARKS_PATH = os.path.join(BASE, "marks.json")
+RENAME_DIR = os.path.join(BASE, "rename")
 # Optional: if <claude config>/session-names/<session_id> exists (e.g. written by a
 # custom status line), its text is used as the session's title in the panel.
 NAMES_DIR = os.path.join(
@@ -61,7 +63,8 @@ def remember_closed(term_sid, cur, reason):
     except Exception:
         m = {}
     rec = {
-        "claude_sid": csid, "cwd": cur.get("cwd"), "title": m.get("title") or cur.get("title"),
+        "claude_sid": csid, "cwd": cur.get("cwd"),
+        "title": transcript_title(cur.get("transcript") or "") or cur.get("title"),
         "prompt": cur.get("prompt"), "closed_at": time.time(), "reason": reason,
         "marks": {k: m[k] for k in ("project", "color", "note", "title", "star") if m.get(k)},
     }
@@ -123,35 +126,37 @@ def track_background(cur, ev, name):
     return (json.dumps(tasks, sort_keys=True), cur.get("crons", 0)) != before
 
 
-def panel_title(term_sid):
+def transcript_title(path):
+    """Claude's current title: the last /rename (custom-title), else its automatic one."""
+    custom = ai = None
     try:
-        with open(MARKS_PATH) as f:
-            marks = json.load(f)
-        return ((marks.get("sessions") or {}).get(term_sid) or {}).get("title")
-    except Exception:
-        return None
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 512 * 1024))
+            for line in f:
+                if b'"custom-title"' in line or b'"ai-title"' in line:
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    if rec.get("type") == "custom-title":
+                        custom = rec.get("customTitle") or custom
+                    elif rec.get("type") == "ai-title":
+                        ai = rec.get("aiTitle") or ai
+    except OSError:
+        pass
+    return custom or ai
 
 
-def sync_title(cur, name, term_sid, has_name_file):
-    """Return the title to hand to Claude Code now, or None.
-
-    "title_confirmed" means Claude Code already reports the panel's title (seen via the
-    optional session-names file). After that, a different name there means the user
-    renamed the session in Claude, and the panel adopts it instead of fighting it.
-    """
-    want = panel_title(term_sid)
-    if not want:
+def take_pending_rename(term_sid):
+    path = os.path.join(RENAME_DIR, os.path.basename(term_sid))
+    try:
+        with open(path) as f:
+            title = " ".join(f.read().split())[:120]
+        os.remove(path)
+        return title or None
+    except OSError:
         return None
-    if cur.get("title") == want:
-        cur["title_confirmed"] = want
-    if name != "UserPromptSubmit" or cur.get("title_confirmed") == want:
-        return None
-    if not has_name_file and cur.get("title_sent") == want:
-        return None  # nothing reports Claude's name back: send once, don't override /rename
-    cur["title_sent"] = want
-    if not has_name_file:
-        cur["title_confirmed"] = want
-    return want
 
 
 def save(path, cur):
@@ -243,27 +248,21 @@ def main():
     if ev.get("cwd"):
         cur["cwd"] = ev["cwd"]
     csid = ev.get("session_id")
-    has_name_file = False
+    if ev.get("transcript_path"):
+        cur["transcript"] = ev["transcript_path"]
     if csid:
         cur["claude_sid"] = csid
         try:
             with open(os.path.join(NAMES_DIR, csid)) as f:
                 title = f.read().strip()
-            has_name_file = True
             if title:
                 cur["title"] = title
         except OSError:
             pass
 
-    new_title = sync_title(cur, name, term_sid, has_name_file)
+    new_title = take_pending_rename(term_sid) if name == "UserPromptSubmit" else None
     save(path, cur)
     if new_title:
-        if has_name_file:  # keep other hooks that read this file from re-applying the old name
-            try:
-                with open(os.path.join(NAMES_DIR, csid), "w") as f:
-                    f.write(new_title)
-            except OSError:
-                pass
         sys.stdout.write(json.dumps({"hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit", "sessionTitle": new_title}}))
 

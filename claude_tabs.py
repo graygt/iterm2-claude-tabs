@@ -15,6 +15,7 @@ Show it with View > Toolbelt > Claude Tabs (Cmd-Shift-B toggles the toolbelt).
 https://github.com/graygt/iterm2-claude-tabs  (MIT licence)
 """
 import asyncio
+import glob
 import json
 import os
 import re
@@ -28,14 +29,100 @@ BASE = os.path.expanduser("~/.config/claude-tabs")
 STATE_DIR = os.path.join(BASE, "state")
 MARKS_PATH = os.path.join(BASE, "marks.json")
 CLOSED_DIR = os.path.join(BASE, "closed")
+RENAME_DIR = os.path.join(BASE, "rename")  # panel renames waiting for the session's next prompt
 CLOSED_SHOWN = 12          # rows in "Recently closed"
 CLOSED_KEEP_SECONDS = 14 * 24 * 3600
 VANISH_GRACE_SECONDS = 5   # a tab must be missing this long before it counts as closed
 HOME = os.path.expanduser("~")
 # Optional per-session name files (e.g. written by a custom status line); kept in step
 # with panel renames so nothing that reads them re-applies an old name.
-NAMES_DIR = os.path.join(
-    os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"), "session-names")
+CLAUDE_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+NAMES_DIR = os.path.join(CLAUDE_DIR, "session-names")
+
+# ---- Claude's own session title, read from the transcript ----------------------------
+# The panel shows what Claude Code shows: the last /rename (custom-title), else Claude's
+# automatic title (ai-title). Transcripts only grow, so each one is read incrementally.
+_TITLES = {}      # transcript path -> {"off": bytes read, "custom": str, "ai": str}
+_TRANSCRIPT = {}  # claude session id -> transcript path (for state files without one)
+
+
+def transcript_path(st):
+    if st.get("transcript"):
+        return st["transcript"]
+    csid = st.get("claude_sid")
+    if not csid:
+        return None
+    if csid not in _TRANSCRIPT:
+        hits = glob.glob(os.path.join(CLAUDE_DIR, "projects", "*", glob.escape(csid) + ".jsonl"))
+        _TRANSCRIPT[csid] = hits[0] if hits else None
+    return _TRANSCRIPT[csid]
+
+
+def claude_title(st):
+    path = transcript_path(st)
+    if not path:
+        return None
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return None
+    c = _TITLES.get(path)
+    if c is None or size < c["off"]:
+        c = _TITLES[path] = {"off": 0, "custom": None, "ai": None}
+    if size > c["off"]:
+        with open(path, "rb") as f:
+            f.seek(c["off"])
+            data = f.read(size - c["off"])
+        end = data.rfind(b"\n") + 1  # leave a half-written last line for next time
+        for line in data[:end].splitlines():
+            if b'"custom-title"' in line or b'"ai-title"' in line:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if rec.get("type") == "custom-title" and rec.get("customTitle"):
+                    c["custom"] = rec["customTitle"]
+                elif rec.get("type") == "ai-title" and rec.get("aiTitle"):
+                    c["ai"] = rec["aiTitle"]
+        c["off"] += end
+    return c["custom"] or c["ai"]
+
+
+def pending_rename(sid):
+    try:
+        with open(os.path.join(RENAME_DIR, os.path.basename(sid))) as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
+def set_pending_rename(sid, title):
+    """Queue a rename; the hook hands it to Claude Code on the session's next prompt."""
+    path = os.path.join(RENAME_DIR, os.path.basename(sid))
+    if not title:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return
+    os.makedirs(RENAME_DIR, exist_ok=True)
+    with open(path, "w") as f:
+        f.write(title)
+    write_name_file(sid, title)
+
+
+def migrate_panel_titles():
+    """Earlier versions kept panel-only titles; turn them into renames of the session."""
+    marks = load_marks()
+    changed = False
+    for sid, m in marks["sessions"].items():
+        if m.get("title"):
+            if not pending_rename(sid):
+                set_pending_rename(sid, m["title"])
+            m.pop("title")
+            changed = True
+    if changed:
+        save_marks(marks)
 TOKEN = secrets.token_hex(16)
 
 COLORS = {
@@ -141,15 +228,9 @@ async def snapshot():
                 if not st:
                     continue
                 m = sessions.get(sid, {})
-                if (m.get("title") and st.get("title_confirmed") == m["title"]
-                        and st.get("title") and st["title"] != m["title"]):
-                    # Renamed inside Claude (/rename) after the panel's name took effect.
-                    m.pop("title", None)
-                    if not m:
-                        sessions.pop(sid, None)
-                    save_marks(marks)
-                title = st.get("title")
-                if not title and not m.get("title"):
+                pending = pending_rename(sid)
+                title = pending or claude_title(st) or st.get("title")
+                if not title:
                     try:
                         title = clean_title(await session.async_get_variable("name"))
                     except Exception:
@@ -159,8 +240,8 @@ async def snapshot():
                 auto = project_of(st.get("cwd"))
                 rows.append({
                     "id": sid,
-                    "title": m.get("title") or title,
-                    "title_set": bool(m.get("title")),
+                    "title": title,
+                    "rename_pending": bool(pending),
                     "state": state,
                     "unread": state in ("done", "error") and SEEN.get(sid, 0) < since,
                     "since": since,
@@ -237,10 +318,11 @@ def remember_closed(sid, st, m, reason):
     csid = st.get("claude_sid")
     if not csid or not (st.get("prompt") or st.get("title")):
         return
+    set_pending_rename(sid, None)
     rec = {
-        "claude_sid": csid, "cwd": st.get("cwd"), "title": m.get("title") or st.get("title"),
+        "claude_sid": csid, "cwd": st.get("cwd"), "title": claude_title(st) or st.get("title"),
         "prompt": st.get("prompt"), "closed_at": time.time(), "reason": reason,
-        "marks": {k: m[k] for k in ("project", "color", "note", "title", "star") if m.get(k)},
+        "marks": {k: m[k] for k in ("project", "color", "note", "star") if m.get(k)},
     }
     os.makedirs(CLOSED_DIR, exist_ok=True)
     out = os.path.join(CLOSED_DIR, csid + ".json")
@@ -302,6 +384,7 @@ async def reopen_session(csid):
     await new.async_send_text("cd %s && claude -r %s\n" % (shlex.quote(cwd), shlex.quote(rec["claude_sid"])))
     marks = load_marks()
     m = dict(rec.get("marks") or {})
+    m.pop("title", None)  # the resumed session keeps Claude's own title
     if m:
         marks["sessions"][new.session_id] = m
         if m.get("project") and m["project"] not in marks["groups"]:
@@ -428,14 +511,14 @@ async def act(req):
                     m[key] = True
                 else:
                     m.pop(key, None)
-            elif key in ("title", "note"):
+            elif key == "title":
+                set_pending_rename(sid, text(val))
+            elif key == "note":
                 v = text(val)
                 if v:
                     m[key] = v
                 else:
                     m.pop(key, None)
-                if key == "title" and v:
-                    write_name_file(sid, v)
             elif key == "color":
                 if val in COLORS:
                     m["color"] = val
@@ -546,6 +629,7 @@ async def main(connection):
     global APP, SERVER
     os.makedirs(STATE_DIR, exist_ok=True)
     APP = await iterm2.async_get_app(connection)
+    migrate_panel_titles()
     try:
         FOCUS["session"] = APP.current_terminal_window.current_tab.current_session.session_id
     except AttributeError:
@@ -614,6 +698,7 @@ input:focus{border-color:var(--act)}
 .note{font-size:11px;opacity:.85;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .star{color:var(--star)}
 .fk{color:var(--mute)}
+.rp{color:var(--mute);font-weight:400}
 .bgb{color:var(--work);font-weight:600}
 .row.child[data-depth="1"]{margin-left:24px}
 .row.child[data-depth="2"]{margin-left:42px}
@@ -766,7 +851,7 @@ function rowHtml(r,g){
  return `<div class="row ${r.state} ${r.unread?'unread':''} ${r.active?'active':''} ${r.postponed?'post':''} ${dep?'child':''}" ${cl}
  ${dep?`data-depth="${dep}"`:''}
  data-id="${r.id}" data-g="${esc(g)}" title="${esc(tip)}"><span class="dot"></span>
- <div class="t">${dep?`<span class="fk" title="Fork of ${esc(par?par.title:'')}">⑂</span> `:''}${r.star?'<span class="star">★</span> ':''}${esc(r.title)}</div><div class="m">${meta.join(' · ')}</div>
+ <div class="t">${dep?`<span class="fk" title="Fork of ${esc(par?par.title:'')}">⑂</span> `:''}${r.star?'<span class="star">★</span> ':''}${esc(r.title)}${r.rename_pending?' <span class="rp" title="Claude takes this name with your next prompt in this tab">↻</span>':''}</div><div class="m">${meta.join(' · ')}</div>
  ${r.note?`<div class="note">✎ ${esc(r.note)}</div>`:''}
  <div class="btns"><button data-op="star" class="${r.star?'on':''}" title="Star">★</button>
  <button data-op="menu" title="More…">⋯</button></div></div>`}
@@ -831,7 +916,7 @@ function rowMenu(id,x,y){
   else if(a==='fork')send({op:'fork',id});
   else if(a==='detach')setKey([id],'parent','');
   else if(a==='star')setKey([id],'star',!r.star);
-  else if(a==='title')ask('Rename session','Claude takes the new name with your next prompt in that tab. Empty restores the automatic title',r.title_set?r.title:'',v=>setKey([id],'title',v),r.title);
+  else if(a==='title')ask('Rename session','Renames the Claude session (like /rename) with your next prompt in that tab',r.title,v=>{if(v&&v!==r.title)setKey([id],'title',v)});
   else if(a==='note')ask('Note','Shown under the title; empty removes it',r.note,v=>setKey([id],'note',v));
   else if(a==='close')confirmClose(r);})}
 function confirmClose(r){

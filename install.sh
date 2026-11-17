@@ -62,7 +62,13 @@ for ev in list(hooks):
             groups.append(g)
     hooks[ev] = groups
 for ev in events:
-    hooks.setdefault(ev, []).append({"hooks": [{"type": "command", "command": cmd}]})
+    entry = {"hooks": [{"type": "command", "command": cmd}]}
+    if ev == "UserPromptSubmit":
+        # First in line: when hooks return different session titles, Claude Code keeps
+        # the first one, and ours only returns one for a rename made in the panel.
+        hooks.setdefault(ev, []).insert(0, entry)
+    else:
+        hooks.setdefault(ev, []).append(entry)
 for ev in [e for e, g in hooks.items() if not g]:
     del hooks[ev]
 open(path, "w").write(json.dumps(d, indent=2, ensure_ascii=False) + "\n")
