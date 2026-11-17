@@ -25,6 +25,7 @@ If you run Claude Code in many tabs at once (some working, some waiting for an a
   - 🔵 **working**: shows the current tool and how long it has been running
   - 🔴 **error**: the turn failed
   - grey **idle**: done and already seen
+- **Background work badge:** a session that still has background subagents, background shell commands or scheduled `/loop` jobs shows them on its row (`⚙ 2 agents ▸ 1 shell ⟳ 1 loop`); hover for what each one is doing. This comes from Claude Code's own task list, so a session can be *idle* and still busy in the background.
 - **Click a row to jump to its tab**, even in another window. The row of the tab you're in is outlined.
 - **Groups.** Sessions start ungrouped at the top. Create groups (right-click empty space → New group…), drag sessions into them, drag whole groups to reorder them, collapse them, rename them.
 - **Two sorts:** *Urgency* puts "needs you" first; *Manual* keeps your drag order.

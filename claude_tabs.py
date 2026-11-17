@@ -166,6 +166,9 @@ async def snapshot():
                     "where": "w%d · tab %d" % (wi + 1, ti + 1),
                     "can_fork": bool(st.get("claude_sid")),
                     "parent": m.get("parent") or "",
+                    "tasks": [{"type": t.get("type") or "task", "desc": t.get("desc") or ""}
+                              for t in (st.get("tasks") or [])][:20],
+                    "crons": int(st.get("crons") or 0),
                     "active": sid == FOCUS["session"],
                 })
 
@@ -586,6 +589,7 @@ input:focus{border-color:var(--act)}
 .note{font-size:11px;opacity:.85;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .star{color:var(--star)}
 .fk{color:var(--mute)}
+.bgb{color:var(--work);font-weight:600}
 .row.child[data-depth="1"]{margin-left:24px}
 .row.child[data-depth="2"]{margin-left:42px}
 .row.child[data-depth="3"]{margin-left:60px}
@@ -715,8 +719,20 @@ function closedHtml(){
    <div class="t">${esc(c.title)}</div><div class="m">closed ${ago(c.closed_at)==='now'?'just now':ago(c.closed_at)+' ago'} · ${esc(c.project)}</div>
    <button class="fx" data-op="forget" title="Remove from list">✕</button></div>`}
  return h}
+// Background work a session still has running (from Claude Code's own task list).
+function bgBadge(r){
+ const ts=r.tasks||[], n=t=>ts.filter(x=>x.type===t).length, other=ts.length-n('subagent')-n('shell');
+ const parts=[], pl=(c,w)=>c+' '+w+(c===1?'':'s');
+ if(n('subagent'))parts.push('⚙ '+pl(n('subagent'),'agent'));
+ if(n('shell'))parts.push('▸ '+pl(n('shell'),'shell'));
+ if(other)parts.push('◦ '+pl(other,'task'));
+ if(r.crons)parts.push('⟳ '+pl(r.crons,'loop'));
+ if(!parts.length)return '';
+ const tip=ts.map(t=>(t.type==='subagent'?'⚙ ':t.type==='shell'?'▸ ':'◦ ')+t.desc).concat(r.crons?['⟳ '+pl(r.crons,'scheduled job')]:[]).join('\n');
+ return `<span class="bgb" title="${esc('Running in the background:\n'+tip)}">${parts.join(' ')}</span>`}
 function rowHtml(r,g){
  const k=key(r), meta=[`<span class="st">${LABEL[k]}</span> ${ago(r.since)}`];
+ const bg=bgBadge(r);if(bg)meta.push(bg);
  if(r.detail&&(r.state==='waiting'||r.state==='working'||(r.state==='error'&&r.unread)))meta.push(esc(r.detail));
  if(view==='status'||!r.project)meta.push(esc(view==='status'&&r.project?r.project:r.auto_project));
  const tip=[r.cwd,r.where,r.prompt?'› '+r.prompt:''].filter(Boolean).join('\n');

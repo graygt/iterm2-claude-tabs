@@ -4,6 +4,8 @@
 Records per-iTerm2-session Claude state in ~/.config/claude-tabs/state/<session-uuid>.json:
   state: working | waiting | done | error | idle
   since: when the state last changed (epoch seconds)
+  tasks: background work still running (subagents, background shells), for the badge
+  crons: number of scheduled jobs (/loop) in the session
 Must stay fast and never fail the hook: every error is swallowed.
 """
 import json
@@ -77,6 +79,56 @@ def remember_closed(term_sid, cur, reason):
     os.replace(tmp, out)
 
 
+def short(v, n=80):
+    return " ".join(str(v or "").split())[:n]
+
+
+def track_background(cur, ev, name):
+    """Keep cur["tasks"] = what is still running in the background of this session.
+
+    Stop and SubagentStop carry Claude Code's own snapshot (background_tasks), which
+    replaces whatever we had. In between, SubagentStart/SubagentStop adjust the list so
+    the badge reacts at once. Returns True if anything changed.
+    """
+    tasks = list(cur.get("tasks") or [])
+    before = (json.dumps(tasks, sort_keys=True), cur.get("crons", 0))
+    agent = ev.get("agent_id")
+    if "background_tasks" in ev:
+        tasks = []
+        for t in ev.get("background_tasks") or []:
+            if t.get("status") not in (None, "running", "pending"):
+                continue
+            if name == "SubagentStop" and t.get("id") == agent:
+                continue  # the snapshot still lists the agent that is stopping
+            tasks.append({
+                "id": t.get("id"), "type": t.get("type") or "task",
+                "desc": short(t.get("description") or t.get("command") or t.get("agent_type")),
+            })
+    elif name == "SubagentStart" and agent:
+        # Claude Code's own after-turn helpers (recap, titles) start once the turn
+        # is over; real background agents start while the session is working.
+        if cur.get("state") == "working" and not any(t.get("id") == agent for t in tasks):
+            tasks.append({"id": agent, "type": "subagent", "desc": short(ev.get("agent_type") or "agent")})
+    elif name == "SubagentStop" and agent:
+        tasks = [t for t in tasks if t.get("id") != agent]
+    elif name == "SessionStart":
+        tasks = []
+    if "session_crons" in ev:
+        cur["crons"] = len(ev.get("session_crons") or [])
+    elif name == "SessionStart":
+        cur["crons"] = 0
+    cur["tasks"] = tasks
+    return (json.dumps(tasks, sort_keys=True), cur.get("crons", 0)) != before
+
+
+def save(path, cur):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = path + ".%d.tmp" % os.getpid()
+    with open(tmp, "w") as f:
+        json.dump(cur, f)
+    os.replace(tmp, path)
+
+
 def main():
     term_sid = os.environ.get("ITERM_SESSION_ID", "")
     if ":" not in term_sid:
@@ -111,9 +163,13 @@ def main():
         except OSError:
             pass
 
+    bg_changed = track_background(cur, ev, name)
+
     # Events from subagents (incl. background agents that outlive the turn) say
     # nothing about whether the main conversation is waiting on you.
     if ev.get("agent_id") and name != "PermissionRequest":
+        if bg_changed and cur:
+            save(path, cur)
         return
 
     state = None
@@ -164,11 +220,7 @@ def main():
         except OSError:
             pass
 
-    os.makedirs(STATE_DIR, exist_ok=True)
-    tmp = path + ".%d.tmp" % os.getpid()
-    with open(tmp, "w") as f:
-        json.dump(cur, f)
-    os.replace(tmp, path)
+    save(path, cur)
 
 
 if __name__ == "__main__":

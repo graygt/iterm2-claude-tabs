@@ -51,7 +51,7 @@ raw = open(path).read()
 d = json.loads(raw or "{}")
 hooks = d.setdefault("hooks", {})
 events = ["SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse", "PostToolUse",
-          "PermissionRequest", "Notification", "Stop", "StopFailure", "SubagentStop"]
+          "PermissionRequest", "Notification", "Stop", "StopFailure", "SubagentStart", "SubagentStop"]
 # Drop earlier claude-tabs entries (any path) so re-running never duplicates them.
 for ev in list(hooks):
     groups = []
