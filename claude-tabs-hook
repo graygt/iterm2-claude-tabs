@@ -148,15 +148,19 @@ def transcript_title(path):
     return custom or ai
 
 
-def take_pending_rename(term_sid):
+def take_pending_rename(term_sid, csid):
+    """A panel rename for this tab, if it was meant for this Claude session."""
     path = os.path.join(RENAME_DIR, os.path.basename(term_sid))
     try:
         with open(path) as f:
-            title = " ".join(f.read().split())[:120]
-        os.remove(path)
-        return title or None
-    except OSError:
+            raw = f.read()
+        os.remove(path)  # used now, or stale (another session runs in this tab)
+        pending = json.loads(raw)
+    except (OSError, ValueError):
         return None
+    if pending.get("csid") != csid:
+        return None
+    return " ".join(str(pending.get("title") or "").split())[:120] or None
 
 
 def save(path, cur):
@@ -260,7 +264,7 @@ def main():
         except OSError:
             pass
 
-    new_title = take_pending_rename(term_sid) if name == "UserPromptSubmit" else None
+    new_title = take_pending_rename(term_sid, csid) if name == "UserPromptSubmit" else None
     save(path, cur)
     if new_title:
         sys.stdout.write(json.dumps({"hookSpecificOutput": {

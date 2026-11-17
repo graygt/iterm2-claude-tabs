@@ -88,18 +88,23 @@ def claude_title(st):
     return c["custom"] or c["ai"]
 
 
-def pending_rename(sid):
+def pending_rename(sid, csid=None):
+    """Title waiting to be handed to Claude; only if it is for the session now in the tab."""
     try:
         with open(os.path.join(RENAME_DIR, os.path.basename(sid))) as f:
-            return f.read().strip() or None
-    except OSError:
+            pending = json.load(f)
+    except (OSError, ValueError):
         return None
+    if csid is not None and pending.get("csid") != csid:
+        return None
+    return pending.get("title") or None
 
 
 def set_pending_rename(sid, title):
     """Queue a rename; the hook hands it to Claude Code on the session's next prompt."""
     path = os.path.join(RENAME_DIR, os.path.basename(sid))
-    if not title:
+    csid = (load_json(os.path.join(STATE_DIR, sid + ".json"), {}) or {}).get("claude_sid")
+    if not title or not csid:
         try:
             os.remove(path)
         except OSError:
@@ -107,7 +112,7 @@ def set_pending_rename(sid, title):
         return
     os.makedirs(RENAME_DIR, exist_ok=True)
     with open(path, "w") as f:
-        f.write(title)
+        json.dump({"csid": csid, "title": title}, f)
     write_name_file(sid, title)
 
 
@@ -228,7 +233,7 @@ async def snapshot():
                 if not st:
                     continue
                 m = sessions.get(sid, {})
-                pending = pending_rename(sid)
+                pending = pending_rename(sid, st.get("claude_sid"))
                 title = pending or claude_title(st) or st.get("title")
                 if not title:
                     try:
