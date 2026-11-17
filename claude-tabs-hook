@@ -6,6 +6,8 @@ Records per-iTerm2-session Claude state in ~/.config/claude-tabs/state/<session-
   since: when the state last changed (epoch seconds)
   tasks: background work still running (subagents, background shells), for the badge
   crons: number of scheduled jobs (/loop) in the session
+A title set in the panel is handed to Claude Code as the session title (the same
+thing /rename does) on the session's next prompt.
 Must stay fast and never fail the hook: every error is swallowed.
 """
 import json
@@ -121,6 +123,37 @@ def track_background(cur, ev, name):
     return (json.dumps(tasks, sort_keys=True), cur.get("crons", 0)) != before
 
 
+def panel_title(term_sid):
+    try:
+        with open(MARKS_PATH) as f:
+            marks = json.load(f)
+        return ((marks.get("sessions") or {}).get(term_sid) or {}).get("title")
+    except Exception:
+        return None
+
+
+def sync_title(cur, name, term_sid, has_name_file):
+    """Return the title to hand to Claude Code now, or None.
+
+    "title_confirmed" means Claude Code already reports the panel's title (seen via the
+    optional session-names file). After that, a different name there means the user
+    renamed the session in Claude, and the panel adopts it instead of fighting it.
+    """
+    want = panel_title(term_sid)
+    if not want:
+        return None
+    if cur.get("title") == want:
+        cur["title_confirmed"] = want
+    if name != "UserPromptSubmit" or cur.get("title_confirmed") == want:
+        return None
+    if not has_name_file and cur.get("title_sent") == want:
+        return None  # nothing reports Claude's name back: send once, don't override /rename
+    cur["title_sent"] = want
+    if not has_name_file:
+        cur["title_confirmed"] = want
+    return want
+
+
 def save(path, cur):
     os.makedirs(STATE_DIR, exist_ok=True)
     tmp = path + ".%d.tmp" % os.getpid()
@@ -210,17 +243,29 @@ def main():
     if ev.get("cwd"):
         cur["cwd"] = ev["cwd"]
     csid = ev.get("session_id")
+    has_name_file = False
     if csid:
         cur["claude_sid"] = csid
         try:
             with open(os.path.join(NAMES_DIR, csid)) as f:
                 title = f.read().strip()
+            has_name_file = True
             if title:
                 cur["title"] = title
         except OSError:
             pass
 
+    new_title = sync_title(cur, name, term_sid, has_name_file)
     save(path, cur)
+    if new_title:
+        if has_name_file:  # keep other hooks that read this file from re-applying the old name
+            try:
+                with open(os.path.join(NAMES_DIR, csid), "w") as f:
+                    f.write(new_title)
+            except OSError:
+                pass
+        sys.stdout.write(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit", "sessionTitle": new_title}}))
 
 
 if __name__ == "__main__":

@@ -32,6 +32,10 @@ CLOSED_SHOWN = 12          # rows in "Recently closed"
 CLOSED_KEEP_SECONDS = 14 * 24 * 3600
 VANISH_GRACE_SECONDS = 5   # a tab must be missing this long before it counts as closed
 HOME = os.path.expanduser("~")
+# Optional per-session name files (e.g. written by a custom status line); kept in step
+# with panel renames so nothing that reads them re-applies an old name.
+NAMES_DIR = os.path.join(
+    os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"), "session-names")
 TOKEN = secrets.token_hex(16)
 
 COLORS = {
@@ -137,6 +141,13 @@ async def snapshot():
                 if not st:
                     continue
                 m = sessions.get(sid, {})
+                if (m.get("title") and st.get("title_confirmed") == m["title"]
+                        and st.get("title") and st["title"] != m["title"]):
+                    # Renamed inside Claude (/rename) after the panel's name took effect.
+                    m.pop("title", None)
+                    if not m:
+                        sessions.pop(sid, None)
+                    save_marks(marks)
                 title = st.get("title")
                 if not title and not m.get("title"):
                     try:
@@ -305,6 +316,18 @@ async def reopen_session(csid):
     return {"ok": True}
 
 
+def write_name_file(sid, title):
+    """Claude Code itself is renamed by the hook on the session's next prompt."""
+    csid = (load_json(os.path.join(STATE_DIR, sid + ".json"), {}) or {}).get("claude_sid")
+    path = os.path.join(NAMES_DIR, os.path.basename(csid or ""))
+    if csid and os.path.isfile(path):
+        try:
+            with open(path, "w") as f:
+                f.write(title)
+        except OSError:
+            pass
+
+
 def text(v, n=120):
     return " ".join(str(v or "").split())[:n]
 
@@ -411,6 +434,8 @@ async def act(req):
                     m[key] = v
                 else:
                     m.pop(key, None)
+                if key == "title" and v:
+                    write_name_file(sid, v)
             elif key == "color":
                 if val in COLORS:
                     m["color"] = val
@@ -806,7 +831,7 @@ function rowMenu(id,x,y){
   else if(a==='fork')send({op:'fork',id});
   else if(a==='detach')setKey([id],'parent','');
   else if(a==='star')setKey([id],'star',!r.star);
-  else if(a==='title')ask('Rename session','Empty restores the automatic title',r.title_set?r.title:'',v=>setKey([id],'title',v),r.title);
+  else if(a==='title')ask('Rename session','Claude takes the new name with your next prompt in that tab. Empty restores the automatic title',r.title_set?r.title:'',v=>setKey([id],'title',v),r.title);
   else if(a==='note')ask('Note','Shown under the title; empty removes it',r.note,v=>setKey([id],'note',v));
   else if(a==='close')confirmClose(r);})}
 function confirmClose(r){
