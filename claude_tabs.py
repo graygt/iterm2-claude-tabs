@@ -355,6 +355,18 @@ def live_session_for(csid):
     return None
 
 
+def is_descendant(sessions, sid, ancestor):
+    """True if sid sits (at any depth) under ancestor in the fork hierarchy."""
+    seen = set()
+    p = (sessions.get(sid) or {}).get("parent")
+    while p and p not in seen:
+        if p == ancestor:
+            return True
+        seen.add(p)
+        p = (sessions.get(p) or {}).get("parent")
+    return False
+
+
 def remember_closed(sid, st, m, reason):
     """Record a session for the Recently closed list (same format the hook writes)."""
     csid = st.get("claude_sid")
@@ -598,14 +610,44 @@ async def act(req):
                 return {"ok": False, "error": "bad key"}
     elif op == "place":
         sid = req.get("id", "")
+        parent = req.get("parent") or ""
+        if parent and (parent == sid or not os.path.exists(os.path.join(STATE_DIR, parent + ".json"))
+                       or is_descendant(sessions, parent, sid)):
+            return {"ok": False, "error": "can't nest a session under itself or its own fork"}
         m = sessions.setdefault(sid, {})
-        m.pop("parent", None)  # dragging a fork somewhere makes it a regular tab
-        m.pop("parent_csid", None)
         if req.get("post"):
             m["postponed"] = True
         else:
             m.pop("postponed", None)
             set_project(m, req.get("group"))
+        if parent:
+            # Nested under a card: it follows that card's group and Postponed state,
+            # and keeps the link by Claude session id like a real fork.
+            pm = sessions.get(parent, {})
+            m["parent"] = parent
+            pc = (load_json(os.path.join(STATE_DIR, parent + ".json"), {}) or {}).get("claude_sid")
+            if pc:
+                m["parent_csid"] = pc
+            else:
+                m.pop("parent_csid", None)
+            set_project(m, pm.get("project"))
+            if pm.get("postponed"):
+                m["postponed"] = True
+            else:
+                m.pop("postponed", None)
+        else:
+            m.pop("parent", None)  # dropped at top level: a regular card
+            m.pop("parent_csid", None)
+        for other, om in sessions.items():  # its forks (any depth) move with it
+            if other != sid and is_descendant(sessions, other, sid):
+                if m.get("project"):
+                    om["project"] = m["project"]
+                else:
+                    om.pop("project", None)
+                if m.get("postponed"):
+                    om["postponed"] = True
+                else:
+                    om.pop("postponed", None)
         for i, other in enumerate(req.get("ids", [])):
             sessions.setdefault(other, {})["order"] = i
             touched.add(other)
@@ -712,10 +754,10 @@ async def main(connection):
 PAGE = r"""<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <style>
-:root{--bg:#f6f6f4;--fg:#1d1d1b;--mute:#76766f;--line:#e2e1dc;--row:#fff;--hover:#efeee9;--menu:#fff;
+:root{--bg:#f6f6f4;--fg:#1d1d1b;--mute:#76766f;--guide:#b9b8b1;--line:#e2e1dc;--row:#fff;--hover:#efeee9;--menu:#fff;
  --act:#2f6fdb;--wait:#e0702a;--done:#1f9d55;--work:#2f6fdb;--err:#d23c3c;--idle:#a6a59e;--star:#d9a300;
  --c-red:#e5484d;--c-orange:#f76b15;--c-yellow:#f0be28;--c-green:#30a46c;--c-blue:#0090ff;--c-purple:#8e4ec6}
-@media (prefers-color-scheme:dark){:root{--bg:#1c1c1e;--fg:#e8e8e6;--mute:#8e8e89;--line:#333336;--menu:#2a2a2d;
+@media (prefers-color-scheme:dark){:root{--bg:#1c1c1e;--fg:#e8e8e6;--mute:#8e8e89;--guide:#5a5a5e;--line:#333336;--menu:#2a2a2d;
  --row:#252527;--hover:#2f2f32;--act:#5b8ff0;--wait:#f08a45;--done:#3cc074;--work:#5b8ff0;--err:#f06060;--idle:#6b6b68;--star:#f0c030}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:12px/1.35 -apple-system,BlinkMacSystemFont,sans-serif;
@@ -766,8 +808,14 @@ input:focus{border-color:var(--act)}
 .row.child[data-depth="1"]{margin-left:24px}
 .row.child[data-depth="2"]{margin-left:42px}
 .row.child[data-depth="3"]{margin-left:60px}
-.row.child::before{content:"";position:absolute;left:-13px;top:-3px;width:9px;height:20px;
- border-left:1px solid var(--mute);border-bottom:1px solid var(--mute);border-bottom-left-radius:5px;opacity:.6}
+/* fork tree: │ runs through the 2px gaps between cards (-3px = gap + border) */
+.tg{position:absolute;pointer-events:none;border:0 solid var(--guide)}
+.tg.v{top:-3px;bottom:-3px;width:0;border-left-width:1px}
+.tg.h{top:15px;width:9px;height:0;border-top-width:1px}
+.tg.e{top:-3px;height:19px;width:9px;border-left-width:1px;border-bottom-width:1px;border-bottom-left-radius:5px}
+.row.ghost{margin:0!important}
+.ghost .tg{display:none}
+.row.into{outline:2px dashed var(--act);outline-offset:1px}
 .btns{position:absolute;right:4px;top:4px;display:none;gap:1px;background:var(--hover);border-radius:5px}
 .row:hover .btns{display:flex}
 .ghost .btns{display:none!important}
@@ -875,10 +923,20 @@ function nest(rows){
  const ids=new Set(rows.map(r=>r.id)),kids={},out=[],seen=new Set();
  const hasParent=r=>r.parent&&r.parent!==r.id&&ids.has(r.parent);
  rows.forEach(r=>{if(hasParent(r))(kids[r.parent]=kids[r.parent]||[]).push(r)});
- const walk=(r,d)=>{if(seen.has(r.id))return;seen.add(r.id);r.depth=d;out.push(r);(kids[r.id]||[]).forEach(k=>walk(k,d+1))};
- rows.forEach(r=>{if(!hasParent(r))walk(r,0)});
- rows.forEach(r=>walk(r,0));  // anything left (parent cycles) at top level
+ // guides: one entry per level for drawing the tree; 'mid' ├, 'end' └, 'pipe' │, '' nothing
+ const walk=(r,d,pre,last)=>{if(seen.has(r.id))return;seen.add(r.id);r.depth=d;
+  r.guides=d?[...pre,last?'end':'mid']:[];out.push(r);
+  const ks=(kids[r.id]||[]).filter(k=>!seen.has(k.id)),next=d?[...pre,last?'':'pipe']:[];
+  ks.forEach((k,i)=>walk(k,d+1,next,i===ks.length-1))};
+ rows.forEach(r=>{if(!hasParent(r))walk(r,0,[],true)});
+ rows.forEach(r=>walk(r,0,[],true));  // anything left (parent cycles) at top level
  return out}
+function guidesHtml(r){
+ const gs=(r.guides||[]).slice(-3);
+ return gs.map((g,i)=>{const x=`left:${-13-18*(gs.length-1-i)}px`;
+  return g==='pipe'?`<span class="tg v" style="${x}"></span>`
+   :g==='mid'?`<span class="tg v" style="${x}"></span><span class="tg h" style="${x}"></span>`
+   :g==='end'?`<span class="tg e" style="${x}"></span>`:''}).join('')}
 function closedHtml(){
  const cs=(D.closed||[]).filter(c=>!q||[c.title,c.project,c.cwd,c.prompt].join('\n').toLowerCase().includes(q));
  if(!cs.length)return '';
@@ -913,7 +971,7 @@ function rowHtml(r,g){
  const par=r.parent&&byId(r.parent), dep=Math.min(r.depth||0,3);
  return `<div class="row ${r.state} ${r.unread?'unread':''} ${r.active?'active':''} ${r.postponed?'post':''} ${dep?'child':''}" ${cl}
  ${dep?`data-depth="${dep}"`:''}
- data-id="${r.id}" data-g="${esc(g)}" title="${esc(tip)}"><span class="dot"></span>
+ data-id="${r.id}" data-g="${esc(g)}" title="${esc(tip)}">${dep?guidesHtml(r):''}<span class="dot"></span>
  <div class="t">${dep?`<span class="fk" title="Fork of ${esc(par?par.title:'')}">⑂</span> `:''}${r.star?'<span class="star">★</span> ':''}${esc(r.title)}${r.rename_pending?' <span class="rp" title="Claude takes this name with your next prompt in this tab">↻</span>':''}</div><div class="m">${meta.join(' · ')}</div>
  ${r.note?`<div class="note">✎ ${esc(r.note)}</div>`:''}
  <div class="btns"><button data-op="star" class="${r.star?'on':''}" title="Star">★</button>
@@ -966,7 +1024,7 @@ function rowMenu(id,x,y){
  const sw=`<div class="sw">${COLORS.map(c=>`<span data-a="color" data-v="${c}" class="${r.color===c?'cur':''}" style="background:var(--c-${c})"></span>`).join('')}
   <span data-a="color" data-v="" class="none ${r.color?'':'cur'}" title="No colour">✕</span></div>`;
  openMenu(x,y,`<div class="mh">${esc(r.title)}</div>`+
-  mi('focus','↗','Go to tab')+(r.can_fork?mi('fork','⑂','Fork session'):'')+(r.parent?mi('detach','⇤','Make regular tab'):'')+
+  mi('focus','↗','Go to tab')+(r.can_fork?mi('fork','⑂','Fork session'):'')+mi('nest','↳','Nest under…')+(r.parent?mi('detach','⇤','Make regular tab'):'')+
   '<div class="sep"></div>'+mi('star','★',r.star?'Unstar':'Star')+
   '<div class="sep"></div>'+sw+'<div class="sep"></div>'+
   mi('move','➜','Move to group…')+mi('title','✎','Rename…')+mi('note','🗒',r.note?'Edit note…':'Add note…')+
@@ -974,6 +1032,7 @@ function rowMenu(id,x,y){
  (a,v)=>{
   if(a==='color'){closeMenu();setKey([id],'color',v);return}
   if(a==='move'){moveMenu([id],x,y);return}
+  if(a==='nest'){nestMenu(id,x,y);return}
   closeMenu();
   if(a==='focus')send({op:'focus',id});
   else if(a==='fork')send({op:'fork',id});
@@ -995,6 +1054,21 @@ function confirmClose(r){
  dlg.onkeydown=e=>{if(e.key==='Escape')done(false)}}
 
 function groupNames(extra){const s=new Set([...D.groups,...D.rows.map(r=>r.project),extra].filter(Boolean));return [...s].sort((a,b)=>a.localeCompare(b))}
+// Is a (at any depth) a fork of anc?
+function isDesc(a,anc){const seen=new Set();let r=byId(a);
+ while(r&&r.parent&&!seen.has(r.id)){if(r.parent===anc)return true;seen.add(r.id);r=byId(r.parent)}return false}
+const groupKey=r=>r.postponed?POST:(r.project||TOP);
+// Place id under parent (or at top level when parent is ''), right after the parent's family.
+function nestUnder(id,parent){
+ const p=byId(parent),g=groupKey(p),ids=(layout[g]||[]).filter(x=>x!==id);
+ let i=ids.indexOf(parent)+1;while(i<ids.length&&isDesc(ids[i],parent))i++;
+ ids.splice(i,0,id);
+ send(g===POST?{op:'place',id,post:true,parent,ids}:{op:'place',id,post:false,group:g===TOP?'':g,parent,ids})}
+function nestMenu(id,x,y){
+ const cands=D.rows.filter(c=>c.id!==id&&!isDesc(c.id,id)).sort((a,b)=>a.title.localeCompare(b.title));
+ if(!cands.length){closeMenu();return}
+ openMenu(x,y,`<div class="mh">Nest under…</div>`+cands.map(c=>mi('p','⑂',c.title+(c.project?'  ·  '+c.project:''),c.id,byId(id).parent===c.id)).join(''),
+  (a,v)=>{closeMenu();if(a==='p')nestUnder(id,v)})}
 function moveMenu(ids,x,y){
  const r=byId(ids[0]);
  openMenu(x,y,`<div class="mh">Move to group</div>`+groupNames(r&&r.auto_project).map(n=>mi('g','',n,n,r&&r.project===n)).join('')+
@@ -1095,7 +1169,7 @@ addEventListener('pointerup',e=>{
  if(!drag)return;const d=drag;
  if(d.on){if(d.kind==='group')finishGroupDrag();else finishDrag();dragEnded=Date.now()}
  else if(!d.moved&&d.kind==='row'){drag=null;send({op:'focus',id:d.id});return}
- drag=null;$('#ins').style.display='none';document.querySelectorAll('.drop').forEach(x=>x.classList.remove('drop'))});
+ drag=null;$('#ins').style.display='none';document.querySelectorAll('.drop,.into').forEach(x=>x.classList.remove('drop','into'))});
 
 /* group drag: headers move whole groups; drop position is decided by group blocks */
 const sel=g=>`[data-g="${CSS.escape(g)}"]`;
@@ -1138,26 +1212,40 @@ function startDrag(e){
  document.body.appendChild(gh);drag.ghost=gh;row.classList.add('dragging')}
 function moveDrag(e){
  drag.ghost.style.top=(e.clientY-drag.dy)+'px';
- const ins=$('#ins');document.querySelectorAll('.drop').forEach(x=>x.classList.remove('drop'));
+ const ins=$('#ins');document.querySelectorAll('.drop,.into').forEach(x=>x.classList.remove('drop','into'));
  const hb=document.querySelector('header').getBoundingClientRect().bottom;
  if(e.clientY<hb+24)scrollBy(0,-10);else if(e.clientY>innerHeight-24)scrollBy(0,10);
- const el=document.elementFromPoint(e.clientX,e.clientY);const t=el&&el.closest('.row:not(.dragging),.grp,.zone');
+ const el=document.elementFromPoint(e.clientX,e.clientY);let t=el&&el.closest('.row:not(.dragging),.grp,.zone');
+ if(!t)  // in the indent left of a card (or the margin): use the card at this height
+  t=[...document.querySelectorAll('#list .row:not(.dragging)')].find(x=>{const b=x.getBoundingClientRect();return e.clientY>=b.top-2&&e.clientY<=b.bottom+2});
  if(!t){return}
  const g=t.dataset.g;
  if(view!=='project'&&g!==POST){ins.style.display='none';drag.target=null;return}
  if(!t.classList.contains('row')){t.classList.add('drop');ins.style.display='none';drag.target={g,index:0};return}
- const rc=t.getBoundingClientRect(),before=e.clientY<rc.top+rc.height/2;
- ins.style.display='block';ins.style.left=(rc.left+4)+'px';ins.style.width=(rc.width-8)+'px';
+ const rc=t.getBoundingClientRect(),tr=byId(t.dataset.id),y=e.clientY,band=rc.height*0.3;
+ const ids=(layout[g]||[]).filter(x=>x!==drag.id);
+ if(tr&&y>rc.top+band&&y<rc.bottom-band&&!isDesc(tr.id,drag.id)){
+  // middle of a card: becomes its fork, placed after its existing forks
+  t.classList.add('into');ins.style.display='none';
+  let i=ids.indexOf(tr.id)+1;while(i<ids.length&&isDesc(ids[i],tr.id))i++;
+  drag.target={g,index:i,parent:tr.id};return}
+ const before=y<rc.top+rc.height/2;
+ // next to a fork, over its card: a sibling under the same parent; in the left gutter: top level
+ let parent=(tr&&tr.depth&&e.clientX>=rc.left)?tr.parent:'';
+ if(parent&&(parent===drag.id||isDesc(parent,drag.id)))parent='';
+ const lb=$('#list').getBoundingClientRect().left+6,left=parent?rc.left:lb;
+ ins.style.display='block';ins.style.left=(left+4)+'px';ins.style.width=(rc.right-left-8)+'px';
  ins.style.top=(before?rc.top-3:rc.bottom+1)+'px';
- const ids=(layout[g]||[]).filter(x=>x!==drag.id);let i=ids.indexOf(t.dataset.id);if(!before)i++;
- drag.target={g,index:i}}
+ let i=ids.indexOf(t.dataset.id);if(!before)i++;
+ drag.target={g,index:i,parent}}
 function finishDrag(){
  drag.ghost.remove();const t=drag.target;if(!t){render(true);return}
  const ids=(layout[t.g]||[]).filter(x=>x!==drag.id);ids.splice(t.index,0,drag.id);
  if(t.g===drag.from&&sort!=='manual')setSort('manual');
  if(t.g===POST&&fold[POST]){fold[POST]=false;store('fold',fold)}
  const id=drag.id;drag=null;
- send(t.g===POST?{op:'place',id,post:true,ids}:{op:'place',id,post:false,group:t.g===TOP?'':t.g,ids})}
+ const parent=t.parent||'';
+ send(t.g===POST?{op:'place',id,post:true,parent,ids}:{op:'place',id,post:false,group:t.g===TOP?'':t.g,parent,ids})}
 
 render(true);poll();setInterval(poll,1000);
 </script></body></html>"""

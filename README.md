@@ -33,7 +33,7 @@ If you run Claude Code in many tabs at once (some working, some waiting for an a
 - **Marks:** star a session, give it a colour (the real iTerm2 tab gets the same colour), attach a note.
 - **Titles stay in sync with Claude.** Rows show the session's own title, so a `/rename` inside Claude shows up in the panel within a second. Renaming a row in the panel renames the Claude session too (saved like `/rename`); Claude takes the new name with your next prompt in that tab, marked ↻ until then.
 - **Postponed:** drag sessions you'll come back to into a folded section at the bottom. It opens by itself when you switch to one of its tabs.
-- **Fork session:** right-click → *Fork session* opens `claude -r <id> --fork-session` in a new tab right next to the original, in the same folder. No more `/status` and copy-pasting IDs.
+- **Fork session:** right-click → *Fork session* opens `claude -r <id> --fork-session` in a new tab right next to the original, in the same folder. No more `/status` and copy-pasting IDs. Forks are drawn as a tree under their original; drag a card onto another card (or right-click → *Nest under…*) to nest it there, and *Make regular tab* to undo.
 - **Recently closed:** every session you closed in the last 7 days; click one to resume it in a new tab with its group, colour and note. A reopened fork goes back under its parent if the parent is still open.
 - **Filter box** across titles, groups, notes, folders and last prompts.
 - **Same view in every window:** groups, order, marks and view settings are shared by the panels of all iTerm2 windows.
@@ -67,8 +67,10 @@ To update later: `git pull && ./install.sh`.
 |---|---|
 | Click a row | jump to that tab |
 | Hover a row | see its folder, window/tab and last prompt; ★ and ⋯ buttons appear |
-| Right-click a row (or ⋯) | fork, star, colour, move to group, rename, add a note, close |
+| Right-click a row (or ⋯) | fork, nest under another session, star, colour, move to group, rename, add a note, close |
 | Drag a row | move it into another group, into Postponed, or to the top (no group) |
+| Drag a row onto the middle of another card | nest it under that card, like a fork (the card is outlined) |
+| Drag a row between forks | make it a fork of the same parent; drop it in the indent to the left to make it a regular card |
 | Drag a group header | reorder groups |
 | Right-click a group header | move up/down, sort A–Z, rename, ungroup all, postpone all, delete |
 | Right-click empty space | create a new group |
