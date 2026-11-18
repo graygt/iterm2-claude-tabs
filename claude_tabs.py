@@ -367,6 +367,29 @@ def is_descendant(sessions, sid, ancestor):
     return False
 
 
+def keep_families(sessions, moved):
+    """After cards in `moved` changed group or Postponed state (as one batch):
+    their forks move with them, and a fork that now sits apart from its parent
+    becomes a regular card (forks only nest inside their parent's group)."""
+    moved = [sid for sid in moved if sid in sessions]
+    for sid in moved:
+        m = sessions[sid]
+        for other, om in sessions.items():
+            if other not in moved and is_descendant(sessions, other, sid):
+                for key in ("project", "postponed"):
+                    if m.get(key):
+                        om[key] = m[key]
+                    else:
+                        om.pop(key, None)
+    for sid in moved:
+        m = sessions[sid]
+        pm = sessions.get(m.get("parent") or "")
+        if m.get("parent") and (pm is None or pm.get("project") != m.get("project")
+                                or bool(pm.get("postponed")) != bool(m.get("postponed"))):
+            m.pop("parent", None)
+            m.pop("parent_csid", None)
+
+
 def remember_closed(sid, st, m, reason):
     """Record a session for the Recently closed list (same format the hook writes)."""
     csid = st.get("claude_sid")
@@ -608,6 +631,8 @@ async def act(req):
                 m.pop("parent_csid", None)
             else:
                 return {"ok": False, "error": "bad key"}
+        if key in ("project", "postponed"):
+            keep_families(sessions, list(req.get("ids", [])))
     elif op == "place":
         sid = req.get("id", "")
         parent = req.get("parent") or ""
@@ -638,16 +663,7 @@ async def act(req):
         else:
             m.pop("parent", None)  # dropped at top level: a regular card
             m.pop("parent_csid", None)
-        for other, om in sessions.items():  # its forks (any depth) move with it
-            if other != sid and is_descendant(sessions, other, sid):
-                if m.get("project"):
-                    om["project"] = m["project"]
-                else:
-                    om.pop("project", None)
-                if m.get("postponed"):
-                    om["postponed"] = True
-                else:
-                    om.pop("postponed", None)
+        keep_families(sessions, [sid])  # its forks (any depth) move with it
         for i, other in enumerate(req.get("ids", [])):
             sessions.setdefault(other, {})["order"] = i
             touched.add(other)
@@ -1216,7 +1232,7 @@ function moveDrag(e){
  const hb=document.querySelector('header').getBoundingClientRect().bottom;
  if(e.clientY<hb+24)scrollBy(0,-10);else if(e.clientY>innerHeight-24)scrollBy(0,10);
  const el=document.elementFromPoint(e.clientX,e.clientY);let t=el&&el.closest('.row:not(.dragging),.grp,.zone');
- if(!t)  // in the indent left of a card (or the margin): use the card at this height
+ if(!t&&e.clientY>hb)  // in the indent left of a card (or the margin): use the card at this height
   t=[...document.querySelectorAll('#list .row:not(.dragging)')].find(x=>{const b=x.getBoundingClientRect();return e.clientY>=b.top-2&&e.clientY<=b.bottom+2});
  if(!t){return}
  const g=t.dataset.g;
@@ -1228,7 +1244,7 @@ function moveDrag(e){
   // middle of a card: becomes its fork, placed after its existing forks
   t.classList.add('into');ins.style.display='none';
   let i=ids.indexOf(tr.id)+1;while(i<ids.length&&isDesc(ids[i],tr.id))i++;
-  drag.target={g,index:i,parent:tr.id};return}
+  drag.target={g,index:i,parent:tr.id,into:true};return}
  const before=y<rc.top+rc.height/2;
  // next to a fork, over its card: a sibling under the same parent; in the left gutter: top level
  let parent=(tr&&tr.depth&&e.clientX>=rc.left)?tr.parent:'';
@@ -1241,7 +1257,7 @@ function moveDrag(e){
 function finishDrag(){
  drag.ghost.remove();const t=drag.target;if(!t){render(true);return}
  const ids=(layout[t.g]||[]).filter(x=>x!==drag.id);ids.splice(t.index,0,drag.id);
- if(t.g===drag.from&&sort!=='manual')setSort('manual');
+ if(t.g===drag.from&&!t.into&&sort!=='manual')setSort('manual');
  if(t.g===POST&&fold[POST]){fold[POST]=false;store('fold',fold)}
  const id=drag.id;drag=null;
  const parent=t.parent||'';
