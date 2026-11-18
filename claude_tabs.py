@@ -30,8 +30,8 @@ STATE_DIR = os.path.join(BASE, "state")
 MARKS_PATH = os.path.join(BASE, "marks.json")
 CLOSED_DIR = os.path.join(BASE, "closed")
 RENAME_DIR = os.path.join(BASE, "rename")  # panel renames waiting for the session's next prompt
-CLOSED_SHOWN = 12          # rows in "Recently closed"
-CLOSED_KEEP_SECONDS = 14 * 24 * 3600
+CLOSED_KEEP_SECONDS = 7 * 24 * 3600  # "Recently closed" lists everything from the last week
+CLOSED_KEEP_MAX = 500      # safety bound on the number of records on disk
 VANISH_GRACE_SECONDS = 5   # a tab must be missing this long before it counts as closed
 HOME = os.path.expanduser("~")
 # Optional per-session name files (e.g. written by a custom status line); kept in step
@@ -397,7 +397,7 @@ def closed_list(live_csids, now):
             continue
         items.append(rec)
     items.sort(key=lambda r: -r.get("closed_at", 0))
-    for rec in items[CLOSED_SHOWN * 3:]:  # bound the directory
+    for rec in items[CLOSED_KEEP_MAX:]:  # bound the directory
         try:
             os.remove(os.path.join(CLOSED_DIR, rec["claude_sid"] + ".json"))
         except OSError:
@@ -410,7 +410,7 @@ def closed_list(live_csids, now):
         "prompt": r.get("prompt") or "",
         "closed_at": r.get("closed_at", now),
         "color": (r.get("marks") or {}).get("color") or "",
-    } for r in items[:CLOSED_SHOWN]]
+    } for r in items]
 
 
 async def reopen_session(csid):

@@ -34,7 +34,7 @@ If you run Claude Code in many tabs at once (some working, some waiting for an a
 - **Titles stay in sync with Claude.** Rows show the session's own title, so a `/rename` inside Claude shows up in the panel within a second. Renaming a row in the panel renames the Claude session too (saved like `/rename`); Claude takes the new name with your next prompt in that tab, marked ↻ until then.
 - **Postponed:** drag sessions you'll come back to into a folded section at the bottom. It opens by itself when you switch to one of its tabs.
 - **Fork session:** right-click → *Fork session* opens `claude -r <id> --fork-session` in a new tab right next to the original, in the same folder. No more `/status` and copy-pasting IDs.
-- **Recently closed:** sessions whose tab you closed are listed for two weeks; click one to resume it in a new tab with its group, colour and note.
+- **Recently closed:** every session you closed in the last 7 days; click one to resume it in a new tab with its group, colour and note. A reopened fork goes back under its parent if the parent is still open.
 - **Filter box** across titles, groups, notes, folders and last prompts.
 - **Same view in every window:** groups, order, marks and view settings are shared by the panels of all iTerm2 windows.
 
